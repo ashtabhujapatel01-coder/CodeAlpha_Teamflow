@@ -120,9 +120,22 @@ test("accounts own persistent projects and tasks through the authenticated API",
     title: "Ship the first milestone",
     project_id: newProject.data.project.id,
     due_date: "2026-11-01",
-    status: "To do"
+    status: "To do",
+    assignee_name: "Ashu"
   }, registration.cookie);
   assert.equal(newTask.status, 201);
+  assert.equal(newTask.data.task.assignee_name, "Ashu");
+
+  const newComment = await request(baseUrl, "POST", `/api/tasks/${newTask.data.task.id}/comments`, {
+    content: "Working on the final checks for this milestone!"
+  }, registration.cookie);
+  assert.equal(newComment.status, 201);
+  assert.equal(newComment.data.comment.author_name, "Jordan Davis");
+
+  const commentsList = await request(baseUrl, "GET", `/api/tasks/${newTask.data.task.id}/comments`, undefined, registration.cookie);
+  assert.equal(commentsList.status, 200);
+  assert.equal(commentsList.data.comments.length, 1);
+  assert.equal(commentsList.data.comments[0].content, "Working on the final checks for this milestone!");
 
   const invalidTask = await request(baseUrl, "POST", "/api/tasks", {
     title: "Bad date",

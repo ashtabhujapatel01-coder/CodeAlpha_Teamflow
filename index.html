@@ -168,9 +168,28 @@
             <div><label class="form-label" for="taskProject">Project</label><select class="form-control" id="taskProject" name="project"><option>Website redesign</option><option>Mobile app</option><option>Brand refresh</option></select></div>
             <div><label class="form-label" for="taskDue">Due date</label><input class="form-control" id="taskDue" name="due" type="date" /></div>
           </div>
-          <label class="form-label" for="taskStatus">Status</label>
-          <select class="form-control" id="taskStatus" name="status"><option>To do</option><option>In progress</option></select>
+          <div class="form-row">
+            <div><label class="form-label" for="taskStatus">Status</label><select class="form-control" id="taskStatus" name="status"><option>To do</option><option>In progress</option></select></div>
+            <div><label class="form-label" for="taskAssignee">Assignee</label><input class="form-control" id="taskAssignee" name="assignee" placeholder="e.g. Ashu" maxlength="50" /></div>
+          </div>
           <div class="modal-footer"><button type="button" class="button button-secondary" id="cancelModalButton">Cancel</button><button type="submit" class="button button-primary">Create task <span>→</span></button></div>
+        </form>
+      </section>
+    </div>
+    <div class="modal-backdrop" id="commentModal" hidden>
+      <section class="task-modal" role="dialog" aria-modal="true" aria-labelledby="commentModalTitle">
+        <div class="modal-heading">
+          <div><span class="modal-kicker">COLLABORATION</span><h2 id="commentModalTitle">Task comments</h2></div>
+          <button class="icon-button close-modal" id="closeCommentModalButton" aria-label="Close dialog">×</button>
+        </div>
+        <div class="comment-task-header" id="commentTaskHeader"></div>
+        <div class="comments-container" id="commentsContainer"></div>
+        <form id="commentForm" class="comment-form">
+          <label class="form-label" for="commentText">Add a comment</label>
+          <div class="comment-input-group">
+            <input class="form-control" id="commentText" name="content" placeholder="Share updates, feedback or questions..." maxlength="500" required />
+            <button type="submit" class="button button-primary">Post</button>
+          </div>
         </form>
       </section>
     </div>

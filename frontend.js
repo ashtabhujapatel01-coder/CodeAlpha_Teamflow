@@ -7,6 +7,10 @@ const projectModal = document.querySelector("#projectModal");
 const projectForm = document.querySelector("#projectForm");
 const workspaceModal = document.querySelector("#workspaceModal");
 const joinWorkspaceForm = document.querySelector("#joinWorkspaceForm");
+const commentModal = document.querySelector("#commentModal");
+const commentForm = document.querySelector("#commentForm");
+const commentsContainer = document.querySelector("#commentsContainer");
+const commentTaskHeader = document.querySelector("#commentTaskHeader");
 const authForm = document.querySelector("#authForm");
 const searchInput = document.querySelector("#searchInput");
 const tabs = [...document.querySelectorAll(".task-tab")];
@@ -16,6 +20,7 @@ let workspaces = [];
 let currentUser = null;
 let currentFilter = "all";
 let currentView = "Overview";
+let activeCommentTask = null;
 let query = "";
 let authMode = "login";
 let toastTimeout;
@@ -286,7 +291,23 @@ function renderTasks() {
     const due = document.createElement("span");
     due.textContent = formatDate(task.due_date);
     meta.append(dot, project, separator, due);
+    if (task.assignee_name && task.assignee_name !== "Unassigned") {
+      const sep = document.createElement("span");
+      sep.className = "task-meta-separator";
+      sep.textContent = "·";
+      const assignee = document.createElement("span");
+      assignee.className = "task-assignee";
+      assignee.textContent = `👤 ${task.assignee_name}`;
+      meta.append(sep, assignee);
+    }
     content.append(title, meta);
+    const commentBtn = document.createElement("button");
+    commentBtn.className = "task-comment-btn";
+    commentBtn.type = "button";
+    commentBtn.title = "View comments";
+    const count = Number(task.comment_count || 0);
+    commentBtn.innerHTML = `💬 <span>${count > 0 ? count : "Add"}</span>`;
+    commentBtn.addEventListener("click", () => openCommentModal(task));
     const status = document.createElement("span");
     status.className = `task-status ${task.status === "In progress" ? "status-progress" : "status-todo"}`;
     status.textContent = task.completed ? "Done" : task.status;
@@ -307,7 +328,7 @@ function renderTasks() {
         showToast(error.message);
       }
     });
-    row.append(check, content, status, remove);
+    row.append(check, content, commentBtn, status, remove);
     taskList.append(row);
   });
 
@@ -484,7 +505,8 @@ taskForm.addEventListener("submit", async (event) => {
         title,
         project_id: String(form.get("project")),
         due_date: String(form.get("due")) || null,
-        status: String(form.get("status"))
+        status: String(form.get("status")),
+        assignee_name: String(form.get("assignee") || "").trim() || "Unassigned"
       }
     });
     tasks.unshift(result.task);
@@ -613,11 +635,86 @@ joinWorkspaceForm.addEventListener("submit", async (event) => {
 document.querySelector("#upgradeButton").addEventListener("click", () => showToast("TeamFlow Pro is coming soon"));
 document.querySelector("#notificationButton").addEventListener("click", () => showToast("You're all caught up!"));
 document.querySelector("#taskFilterButton").addEventListener("click", () => showToast("Showing tasks for this week"));
+async function openCommentModal(task) {
+  activeCommentTask = task;
+  commentTaskHeader.innerHTML = `<strong>${task.title}</strong><span>${task.project} · ${task.assignee_name || "Unassigned"}</span>`;
+  commentsContainer.innerHTML = `<p class="empty-state">Loading comments...</p>`;
+  openModal(commentModal, "#commentText");
+  try {
+    const data = await api(`/api/tasks/${task.id}/comments`);
+    renderComments(data.comments || []);
+  } catch (error) {
+    commentsContainer.innerHTML = `<p class="empty-state">Failed to load comments: ${error.message}</p>`;
+  }
+}
+
+function renderComments(comments) {
+  commentsContainer.replaceChildren();
+  if (!comments.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-state";
+    empty.textContent = "No comments yet. Start the conversation!";
+    commentsContainer.append(empty);
+    return;
+  }
+  comments.forEach((c) => {
+    const item = document.createElement("div");
+    item.className = "comment-item";
+    const header = document.createElement("div");
+    header.className = "comment-author-row";
+    const name = document.createElement("strong");
+    name.textContent = c.author_name;
+    const time = document.createElement("span");
+    time.className = "comment-time";
+    time.textContent = new Date(c.created_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    header.append(name, time);
+    const body = document.createElement("p");
+    body.className = "comment-body";
+    body.textContent = c.content;
+    item.append(header, body);
+    commentsContainer.append(item);
+  });
+  commentsContainer.scrollTop = commentsContainer.scrollHeight;
+}
+
+document.querySelector("#closeCommentModalButton")?.addEventListener("click", () => closeModal(commentModal, commentForm));
+commentModal?.addEventListener("click", (event) => {
+  if (event.target === commentModal) closeModal(commentModal, commentForm);
+});
+
+commentForm?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!activeCommentTask) return;
+  const input = document.querySelector("#commentText");
+  const content = input.value.trim();
+  if (!content) return;
+  const button = commentForm.querySelector('[type="submit"]');
+  button.disabled = true;
+  try {
+    await api(`/api/tasks/${activeCommentTask.id}/comments`, {
+      method: "POST",
+      body: { content }
+    });
+    input.value = "";
+    activeCommentTask.comment_count = (Number(activeCommentTask.comment_count) || 0) + 1;
+    tasks = tasks.map((t) => t.id === activeCommentTask.id ? { ...t, comment_count: activeCommentTask.comment_count } : t);
+    renderTasks();
+    const data = await api(`/api/tasks/${activeCommentTask.id}/comments`);
+    renderComments(data.comments || []);
+    showToast("Comment posted");
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    button.disabled = false;
+  }
+});
+
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     if (!taskModal.hidden) closeModal(taskModal, taskForm);
     if (!projectModal.hidden) closeModal(projectModal, projectForm);
     if (!workspaceModal.hidden) closeModal(workspaceModal, joinWorkspaceForm);
+    if (!commentModal.hidden) closeModal(commentModal, commentForm);
   }
   if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
     event.preventDefault();

@@ -106,6 +106,19 @@ ensureColumn("users", "default_workspace_id", "TEXT");
 ensureColumn("sessions", "workspace_id", "TEXT");
 ensureColumn("projects", "workspace_id", "TEXT REFERENCES workspaces(id) ON DELETE CASCADE");
 ensureColumn("tasks", "workspace_id", "TEXT REFERENCES workspaces(id) ON DELETE CASCADE");
+ensureColumn("tasks", "assignee_name", "TEXT");
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS task_comments (
+    id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    author_name TEXT NOT NULL,
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS task_comments_task_idx ON task_comments(task_id, created_at);
+`);
 
 const insertWorkspace = db.prepare("INSERT INTO workspaces (id, name, owner_id) VALUES (?, ?, ?)");
 const insertWorkspaceMember = db.prepare("INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role) VALUES (?, ?, ?)");
@@ -184,24 +197,28 @@ const statements = {
   deleteProject: db.prepare("DELETE FROM projects WHERE id = ? AND workspace_id = ?"),
   listTasks: db.prepare(`
     SELECT tasks.id, tasks.title, tasks.project_id, projects.name AS project,
-      tasks.due_date, tasks.status, tasks.completed, tasks.created_at, tasks.updated_at
+      tasks.due_date, tasks.status, tasks.completed, tasks.assignee_name,
+      (SELECT COUNT(*) FROM task_comments WHERE task_comments.task_id = tasks.id) AS comment_count,
+      tasks.created_at, tasks.updated_at
     FROM tasks JOIN projects ON projects.id = tasks.project_id
     WHERE tasks.workspace_id = ?
     ORDER BY tasks.completed ASC, tasks.due_date IS NULL, tasks.due_date, tasks.created_at DESC
   `),
   taskById: db.prepare(`
-    SELECT id, title, project_id, due_date, status, completed, created_at, updated_at
-    FROM tasks     WHERE id = ? AND workspace_id = ?
+    SELECT id, title, project_id, due_date, status, completed, assignee_name, created_at, updated_at
+    FROM tasks WHERE id = ? AND workspace_id = ?
   `),
   insertTask: db.prepare(`
-    INSERT INTO tasks (id, user_id, workspace_id, project_id, title, due_date, status, completed)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO tasks (id, user_id, workspace_id, project_id, title, due_date, status, completed, assignee_name)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
   `),
   updateTask: db.prepare(`
-    UPDATE tasks SET project_id = ?, title = ?, due_date = ?, status = ?, completed = ?, updated_at = CURRENT_TIMESTAMP
+    UPDATE tasks SET project_id = ?, title = ?, due_date = ?, status = ?, completed = ?, assignee_name = ?, updated_at = CURRENT_TIMESTAMP
     WHERE id = ? AND workspace_id = ?
   `),
-  deleteTask: db.prepare("DELETE FROM tasks WHERE id = ? AND workspace_id = ?")
+  deleteTask: db.prepare("DELETE FROM tasks WHERE id = ? AND workspace_id = ?"),
+  listComments: db.prepare("SELECT id, task_id, user_id, author_name, content, created_at FROM task_comments WHERE task_id = ? ORDER BY created_at ASC"),
+  insertComment: db.prepare("INSERT INTO task_comments (id, task_id, user_id, author_name, content) VALUES (?, ?, ?, ?, ?)")
 };
 
 function sendJson(response, status, data, extraHeaders = {}) {
@@ -326,14 +343,18 @@ function seedWorkspace(userId, workspaceId) {
     statements.insertProject.run(project.id, userId, workspaceId, project.name, project.category, project.color, dateOffset(project.offset));
   }
   const samples = [
-    ["Finalize homepage wireframes", projects[0].id, 0, "In progress"],
-    ["Review Q4 campaign brief", projects[2].id, 0, "To do"],
-    ["Update component library", projects[0].id, 2, "In progress"],
-    ["Share onboarding feedback", projects[1].id, 3, "To do"],
-    ["Prepare sprint planning notes", projects[1].id, 4, "In progress"]
+    ["Finalize homepage wireframes", projects[0].id, 0, "In progress", "Jordan Davis"],
+    ["Review Q4 campaign brief", projects[2].id, 0, "To do", "Alex Lee"],
+    ["Update component library", projects[0].id, 2, "In progress", "Jordan Davis"],
+    ["Share onboarding feedback", projects[1].id, 3, "To do", "Ashu"],
+    ["Prepare sprint planning notes", projects[1].id, 4, "In progress", "Ashu"]
   ];
-  for (const [title, projectId, offset, status] of samples) {
-    statements.insertTask.run(crypto.randomUUID(), userId, workspaceId, projectId, title, dateOffset(offset), status, 0);
+  for (const [title, projectId, offset, status, assignee] of samples) {
+    const taskId = crypto.randomUUID();
+    statements.insertTask.run(taskId, userId, workspaceId, projectId, title, dateOffset(offset), status, 0, assignee);
+    if (title.startsWith("Finalize")) {
+      statements.insertComment.run(crypto.randomUUID(), taskId, userId, "Jordan Davis", "Wireframe v2 is almost ready for client review!");
+    }
   }
 }
 
@@ -503,14 +524,33 @@ async function handleApi(request, response, pathname) {
     const projectId = typeof body.project_id === "string" ? body.project_id : "";
     const status = body.status;
     const dueDate = body.due_date || null;
+    const assigneeName = typeof body.assignee_name === "string" && body.assignee_name.trim() ? body.assignee_name.trim() : "Unassigned";
     if (title.length < 1 || title.length > 200) return sendError(response, 400, "Task title must be between 1 and 200 characters.");
     if (!getProjectForWorkspace(projectId, user.workspace_id)) return sendError(response, 400, "Choose a project in your workspace.");
     if (!["To do", "In progress"].includes(status)) return sendError(response, 400, "Choose a valid task status.");
     if (!validDate(dueDate)) return sendError(response, 400, "Enter a valid task due date.");
     const id = crypto.randomUUID();
-    statements.insertTask.run(id, user.id, user.workspace_id, projectId, title, dueDate || null, status, 0);
+    statements.insertTask.run(id, user.id, user.workspace_id, projectId, title, dueDate || null, status, 0, assigneeName);
     const task = statements.listTasks.all(user.workspace_id).find((item) => item.id === id);
     return sendJson(response, 201, { task: { ...task, completed: Boolean(task.completed) } });
+  }
+
+  const commentsMatch = pathname.match(/^\/api\/tasks\/([0-9a-f-]{36})\/comments$/i);
+  if (commentsMatch && request.method === "GET") {
+    const task = statements.taskById.get(commentsMatch[1], user.workspace_id);
+    if (!task) return sendError(response, 404, "Task not found.");
+    const comments = statements.listComments.all(task.id);
+    return sendJson(response, 200, { comments });
+  }
+  if (commentsMatch && request.method === "POST") {
+    const task = statements.taskById.get(commentsMatch[1], user.workspace_id);
+    if (!task) return sendError(response, 404, "Task not found.");
+    const body = await readJson(request);
+    const content = typeof body.content === "string" ? body.content.trim() : "";
+    if (!content || content.length > 1000) return sendError(response, 400, "Comment must be between 1 and 1000 characters.");
+    const id = crypto.randomUUID();
+    statements.insertComment.run(id, task.id, user.id, user.name, content);
+    return sendJson(response, 201, { comment: { id, task_id: task.id, user_id: user.id, author_name: user.name, content, created_at: new Date().toISOString() } });
   }
 
   const taskMatch = pathname.match(/^\/api\/tasks\/([0-9a-f-]{36})$/i);
@@ -523,12 +563,13 @@ async function handleApi(request, response, pathname) {
     const dueDate = body.due_date === undefined ? task.due_date : body.due_date;
     const status = body.status === undefined ? task.status : body.status;
     const completed = body.completed === undefined ? Boolean(task.completed) : body.completed;
+    const assigneeName = body.assignee_name === undefined ? (task.assignee_name || "Unassigned") : typeof body.assignee_name === "string" ? body.assignee_name.trim() : "Unassigned";
     if (title.length < 1 || title.length > 200) return sendError(response, 400, "Task title must be between 1 and 200 characters.");
     if (!getProjectForWorkspace(projectId, user.workspace_id)) return sendError(response, 400, "Choose a project in your workspace.");
     if (!["To do", "In progress"].includes(status)) return sendError(response, 400, "Choose a valid task status.");
     if (typeof completed !== "boolean") return sendError(response, 400, "Task completion must be true or false.");
     if (!validDate(dueDate)) return sendError(response, 400, "Enter a valid task due date.");
-    statements.updateTask.run(projectId, title, dueDate || null, status, Number(completed), task.id, user.workspace_id);
+    statements.updateTask.run(projectId, title, dueDate || null, status, Number(completed), assigneeName, task.id, user.workspace_id);
     const updatedTask = statements.listTasks.all(user.workspace_id).find((item) => item.id === task.id);
     return sendJson(response, 200, { task: { ...updatedTask, completed: Boolean(updatedTask.completed) } });
   }
